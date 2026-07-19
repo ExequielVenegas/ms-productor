@@ -2,14 +2,17 @@ name: Pipeline CI/CD - MS Productor Cloud Native
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master" ] # Disparador ajustado exactamente a tu rama principal
   pull_request:
     branches: [ "master" ]
 
 jobs:
   build-and-containerize:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Runner Linux x86_64 para paridad binaria con EC2 Amazon Linux 2023
 
+    # 1. SERVICIOS DE DEPENDENCIAS (Service Containers)
+    # Levantamos RabbitMQ temporalmente en el runner para que la inicialización
+    # del contexto de Spring Boot (AMQP) no falle durante el ciclo de tests.
     services:
       rabbitmq:
         image: rabbitmq:3-management
@@ -28,16 +31,20 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # --- NUEVO PASO DEVSECOPS: RECONSTRUIR WALLET DE ORACLE ---
-    - name: 3. Decodificar y reconstruir Oracle Wallet desde Secret
+    # 2. ESTRATEGIA DEVSECOPS: RECONSTRUCCIÓN DEL WALLET DE ORACLE
+    - name: 3. Decodificar y reconstruir Oracle Wallet desde Secret Base64
       run: |
         mkdir -p src/main/resources/wallet
+        # Decodificamos el secreto cifrado de GitHub y recreamos el archivo zip
         echo "${{ secrets.ORACLE_WALLET_BASE64 }}" | base64 --decode > wallet.zip
+        # Descomprimimos forzando la sobreescritura directamente en la carpeta de recursos
         unzip -o wallet.zip -d src/main/resources/wallet/
         rm wallet.zip
-        ls -la src/main/resources/wallet/ # Verificación en logs de que los archivos se crearon
-    # -----------------------------------------------------------
+        # Verificación visual en logs para auditar que tnsnames.ora y cwallet.sso estén presentes
+        echo "--- Auditoría de archivos del Wallet de Oracle ---"
+        ls -la src/main/resources/wallet/
 
+    # 3. COMPILACIÓN Y PRUEBAS CON DOBLE INYECCIÓN DE PARÁMETROS TNS
     - name: 4. Compilar proyecto y Ejecutar Pruebas (Maven)
       env:
         SPRING_PROFILES_ACTIVE: default
@@ -49,7 +56,11 @@ jobs:
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
         S3_BUCKET_NAME: guias-despacho-ervr-2026
-      run: mvn clean package -DskipTests=false
+        # Variables de entorno para el direccionamiento de red nativo de Oracle
+        TNS_ADMIN: src/main/resources/wallet
+        WALLET_PATH: src/main/resources/wallet
+      # Inyectamos las propiedades de la JVM (-D) para garantizar que HikariCP localice el Wallet
+      run: mvn clean package -DskipTests=false -Doracle.net.tns_admin=src/main/resources/wallet -Doracle.net.wallet_location=src/main/resources/wallet
 
     - name: 5. Iniciar sesión en Docker Hub
       uses: docker/login-action@v2
